@@ -1,0 +1,10 @@
+# /etc/default/monserver — flags for monserver.service
+#
+#   -ifaces    interfaces to monitor (required), comma-separated
+#   -listen    HTTP bind ip:port
+#   -sample    talker sampling 1-in-N (power of two; 1 = every packet)
+#   -retention in-RAM history window (RAM: ~0.45GB counters + ~1.45GB/iface at defaults)
+#   -topn      talkers kept per 200ms tick per direction
+#   -no-mlock  allow history to swap
+
+OPTS=-ifaces eth0 -listen 127.0.0.1:8676

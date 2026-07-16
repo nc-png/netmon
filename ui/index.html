@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>monserver</title>
+<link rel="stylesheet" href="/uplot.css">
+<style>
+:root {
+  color-scheme: light;
+  --page: #f9f9f7; --surface: #fcfcfb;
+  --ink: #0b0b0b; --ink2: #52514e; --mut: #898781;
+  --grid: #e1e0d9; --axis: #c3c2b7; --border: rgba(11,11,11,.10);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --page: #0d0d0d; --surface: #1a1a19;
+    --ink: #fff; --ink2: #c3c2b7; --mut: #898781;
+    --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,.10);
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--page); color: var(--ink);
+  font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+header { display: flex; flex-wrap: wrap; gap: .6rem 1rem; align-items: center;
+  padding: .6rem 1rem; position: sticky; top: 0; z-index: 10;
+  background: var(--page); border-bottom: 1px solid var(--border); }
+h1 { font-size: 1rem; margin: 0; }
+h2 { font-size: .85rem; margin: 0 0 .4rem; color: var(--ink2); font-weight: 600; }
+select, button { font: inherit; color: var(--ink); background: var(--surface);
+  border: 1px solid var(--border); border-radius: 6px; padding: .2rem .6rem; cursor: pointer; }
+button.on { outline: 2px solid #2a78d6; }
+#status { color: var(--mut); font-size: .8rem; margin-left: auto; }
+main { display: grid; grid-template-columns: repeat(auto-fit, minmax(480px, 1fr));
+  gap: .8rem; padding: .8rem 1rem; }
+.card { background: var(--surface); border: 1px solid var(--border);
+  border-radius: 8px; padding: .5rem .6rem .2rem; min-width: 0; }
+.cap { color: var(--ink2); font-size: .75rem; min-height: 1em; padding: 0 .4rem .2rem; }
+#talkers { display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr));
+  gap: .8rem; padding: 0 1rem 1.5rem; }
+table { width: 100%; border-collapse: collapse; font-size: .8rem;
+  font-variant-numeric: tabular-nums; }
+th { text-align: left; color: var(--mut); font-weight: 500;
+  border-bottom: 1px solid var(--grid); padding: .15rem .4rem; }
+td { padding: .15rem .4rem; border-bottom: 1px solid var(--grid); }
+tr:last-child td { border-bottom: 0; }
+.u-title { font-size: .85rem !important; color: var(--ink2) !important; font-weight: 600 !important; }
+.u-legend { font-size: .72rem !important; color: var(--ink2) !important; }
+.hint { color: var(--mut); font-size: .75rem; padding: 0 1rem 1rem; }
+</style>
+</head>
+<body>
+<header>
+  <h1>monserver</h1>
+  <select id="iface"></select>
+  <nav id="ranges" style="display:flex;gap:.3rem;flex-wrap:wrap"></nav>
+  <span id="status"></span>
+</header>
+<main id="charts"></main>
+<section style="padding:0 1rem .8rem">
+  <div class="card">
+    <h2 id="ev_h">TCP events — click a point on the “TCP failures” chart to see what happened there</h2>
+    <table id="ev_t"></table>
+  </div>
+</section>
+<section id="talkers">
+  <div class="card"><h2>Top sources — inbound</h2><table id="t_rx"></table></div>
+  <div class="card"><h2>Top destinations — outbound</h2><table id="t_tx"></table></div>
+</section>
+<p class="hint">Drag on any chart to zoom in (data is re-fetched at full 200&nbsp;ms resolution) · double-click to zoom back out · faint dashed lines are per-bucket peaks.</p>
+<script src="/uplot.js"></script>
+<script>
+const $ = s => document.querySelector(s);
+const PAL = { light: ['#2a78d6','#008300','#e87ba4','#eda100','#1baf7a','#eb6834','#4a3aa7','#e34948'],
+              dark:  ['#3987e5','#008300','#d55181','#c98500','#199e70','#d95926','#9085e9','#e66767'] };
+const mq = matchMedia('(prefers-color-scheme: dark)');
+const mode = () => mq.matches ? 'dark' : 'light';
+const cssVar = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+
+const RANGES = { '5m': 3e5, '15m': 9e5, '1h': 36e5, '6h': 216e5, '24h': 864e5, '7d': 6048e5 };
+
+function fmtSI(v, unit) {
+  if (v == null || isNaN(v)) return '–';
+  const a = Math.abs(v);
+  const [d, p] = a >= 1e12 ? [1e12,'T'] : a >= 1e9 ? [1e9,'G'] : a >= 1e6 ? [1e6,'M'] : a >= 1e3 ? [1e3,'k'] : [1,''];
+  const x = v / d;
+  return x.toFixed(Math.abs(x) >= 100 ? 0 : Math.abs(x) >= 10 ? 1 : 2) + ' ' + p + unit;
+}
+
+const CHARTS = IF => [
+  { title: 'Throughput', unit: 'bit/s', peak: true,
+    series: [{ n: IF+'.rx_bytes', l: 'rx', x: 8 }, { n: IF+'.tx_bytes', l: 'tx', x: 8 }] },
+  { title: 'Packets', unit: 'pkt/s', peak: true,
+    series: [{ n: IF+'.rx_pkts', l: 'rx' }, { n: IF+'.tx_pkts', l: 'tx' }] },
+  { title: 'Drops & errors', unit: '/s',
+    series: [{ n: IF+'.rx_drop', l: 'rx drop' }, { n: IF+'.tx_drop', l: 'tx drop' },
+             { n: IF+'.rx_errs', l: 'rx err' }, { n: IF+'.tx_errs', l: 'tx err' },
+             { n: 'sys.softnet_drop', l: 'softnet drop' }] },
+  { title: 'TCP failures', unit: '/s', ev: true,
+    series: [{ n: 'tcp.attempt_fails', l: 'attempt fails' }, { n: 'tcp.listen_drops', l: 'listen drops' },
+             { n: 'tcp.listen_overflows', l: 'listen overflows' }, { n: 'tcp.estab_resets', l: 'estab resets' },
+             { n: 'tcp.retrans_segs', l: 'retrans segs' }] },
+  { title: 'CPU', unit: '%', max100: true,
+    series: [{ n: 'sys.cpu_busy', l: 'busy' }, { n: 'sys.cpu_softirq', l: 'softirq' },
+             { n: 'sys.cpu_softirq_max', l: 'softirq max core' }] },
+  { title: 'Net softirqs', unit: '/s',
+    series: [{ n: 'sys.softirq_net_rx', l: 'NET_RX' }, { n: 'sys.softirq_net_tx', l: 'NET_TX' }] },
+];
+
+let plots = [];
+let state = { iface: null, live: '15m', from: 0, to: 0, stack: [] };
+
+async function j(u) { const r = await fetch(u); return r.json(); }
+
+function build() {
+  plots.forEach(p => p.u.destroy());
+  $('#charts').innerHTML = '';
+  const pal = PAL[mode()], mut = cssVar('--mut'), grid = cssVar('--grid');
+  // create every card first so the grid reaches its final column count,
+  // then size the plots against the settled layout
+  const cards = CHARTS(state.iface).map(c => {
+    const el = document.createElement('div'); el.className = 'card';
+    const box = document.createElement('div');
+    const cap = document.createElement('div'); cap.className = 'cap';
+    el.append(box, cap); $('#charts').append(el);
+    return { c, el, box, cap };
+  });
+  plots = cards.map(({ c, el, box, cap }) => {
+    const series = [{}];
+    c.series.forEach((s, i) => {
+      series.push({ label: s.l, stroke: pal[i], width: 2, points: { show: false },
+        value: (u, v) => fmtSI(v, c.unit) });
+      if (c.peak) series.push({ label: s.l + ' pk', stroke: pal[i] + '55', width: 1,
+        dash: [3, 3], points: { show: false }, value: (u, v) => fmtSI(v, c.unit) });
+    });
+    const u = new uPlot({
+      title: c.title, width: box.clientWidth || $('#charts').clientWidth - 40, height: 170,
+      series,
+      scales: {
+        // x spans the *requested* window, so regions with no data render as
+        // empty space instead of the data stretching to fill the plot
+        x: { time: true, range: () => [state.from / 1000, state.to / 1000] },
+        y: c.max100 ? { range: [0, 100] }
+                    : { range: (u, mn, mx) => [0, mx > 0 ? mx * 1.05 : 1] },
+      },
+      axes: [
+        { stroke: mut, grid: { stroke: grid, width: 1 }, ticks: { stroke: grid } },
+        { stroke: mut, grid: { stroke: grid, width: 1 }, ticks: { stroke: grid },
+          size: 64, values: (u, vs) => vs.map(v => fmtSI(v, '')) },
+      ],
+      cursor: { drag: { x: true, y: false }, sync: { key: 'ms' } },
+      hooks: { setSelect: [u => {
+        if (u.select.width < 5) return;
+        const f = u.posToVal(u.select.left, 'x') * 1000;
+        const t = u.posToVal(u.select.left + u.select.width, 'x') * 1000;
+        u.setSelect({ left: 0, width: 0, top: 0, height: 0 }, false);
+        state.zoomedAt = Date.now();
+        state.stack.push({ from: state.from, to: state.to, live: state.live });
+        state.live = null; state.from = f; state.to = t;
+        markLive(null); refresh();
+      }] },
+    }, series.map(() => []), box);
+    el.addEventListener('dblclick', back);
+    if (c.ev) {
+      box.style.cursor = 'crosshair';
+      box.addEventListener('click', () => inspectTCP(u));
+    }
+    return { c, u, cap, box };
+  });
+}
+
+async function refresh() {
+  if (state.live) { state.to = Date.now(); state.from = state.to - RANGES[state.live]; }
+  const names = [...new Set(plots.flatMap(p => p.c.series.map(s => s.n)))];
+  const pts = Math.min(2000, Math.max(300, plots[0] ? plots[0].box.clientWidth : 800));
+  const q = await j(`/api/query?series=${names.join(',')}&from=${Math.round(state.from)}&to=${Math.round(state.to)}&points=${pts}`);
+  state.step = q.stepMs;
+  const first = q.series[names[0]];
+  const n = first ? first.avg.length : 0;
+  const xs = Array.from({ length: n }, (_, i) => (q.fromMs + i * q.stepMs + q.stepMs / 2) / 1000);
+  for (const p of plots) {
+    const data = [xs], caps = [];
+    for (const s of p.c.series) {
+      const d = q.series[s.n] || { avg: [], max: [] };
+      const x = s.x || 1;
+      data.push(d.avg.map(v => v == null ? null : v * x));
+      if (p.c.peak) {
+        data.push(d.max.map(v => v == null ? null : v * x));
+        const mx = d.max.reduce((m, v) => v != null && v * x > m ? v * x : m, 0);
+        caps.push(`peak ${s.l} ${fmtSI(mx, p.c.unit)}`);
+      }
+    }
+    p.u.setData(data);
+    p.cap.textContent = caps.join('  ·  ');
+  }
+  talkers();
+  $('#status').textContent =
+    new Date(state.from).toLocaleString() + ' → ' + new Date(state.to).toLocaleString()
+    + (state.live ? ` · live ${state.live} @ ${fmtSI(q.stepMs / 1000, 's')} step` : ` · ${fmtSI(q.stepMs / 1000, 's')} step`);
+}
+
+async function inspectTCP(u) {
+  if (Date.now() - (state.zoomedAt || 0) < 400) return; // that click was a drag-zoom
+  const idx = u.cursor.idx;
+  if (idx == null || u.data[0][idx] == null) return;
+  const t = u.data[0][idx] * 1000;
+  const half = Math.max(state.step || 200, 2000) / 2; // clicked bucket, min 2s window
+  const from = Math.round(t - half), to = Math.round(t + half);
+  const r = await j(`/api/tcpevents?iface=${state.iface}&from=${from}&to=${to}&n=30`);
+  $('#ev_h').textContent = `TCP events ${new Date(from).toLocaleTimeString()} – ${new Date(to).toLocaleTimeString()}`
+    + ` · ${r.total} events` + (state.iface ? ` on ${state.iface}` : '');
+  $('#ev_t').innerHTML =
+    '<tr><th>count</th><th>event</th><th>dir</th><th>remote</th><th>port</th></tr>'
+    + ((r.rows || []).map(e =>
+        `<tr><td>${e.count}</td><td>${e.type}</td><td>${e.dir}</td><td>${e.remote}</td><td>${e.port}</td></tr>`).join('')
+      || '<tr><td colspan="5">no SYN / SYN-ACK / RST packets seen in this window</td></tr>');
+}
+
+async function talkers() {
+  const t = await j(`/api/talkers?iface=${state.iface}&from=${Math.round(state.from)}&to=${Math.round(state.to)}&n=25`);
+  const dur = Math.max((state.to - state.from) / 1000, 0.2);
+  for (const dir of ['rx', 'tx']) {
+    const rows = (t[dir] || []).map((e, i) =>
+      `<tr><td>${i + 1}</td><td>${e.ip}</td><td>${fmtSI(e.bytes, 'B')}</td><td>${fmtSI(e.bytes * 8 / dur, 'bit/s')}</td></tr>`).join('');
+    $('#t_' + dir).innerHTML =
+      `<tr><th>#</th><th>${dir === 'rx' ? 'source IP' : 'destination IP'}</th><th>est. bytes</th><th>avg rate</th></tr>`
+      + (rows || '<tr><td colspan="4">no data (sampling off or no traffic)</td></tr>');
+  }
+}
+
+function back() {
+  const prev = state.stack.pop();
+  if (prev) Object.assign(state, prev);
+  else if (!state.live) state.live = '15m';
+  markLive(state.live); refresh();
+}
+
+function markLive(k) {
+  document.querySelectorAll('#ranges button[data-r]').forEach(b =>
+    b.classList.toggle('on', b.dataset.r === k));
+}
+
+(async function init() {
+  const meta = await j('/api/meta');
+  const sel = $('#iface');
+  meta.ifaces.forEach(i => sel.add(new Option(i, i)));
+  state.iface = meta.ifaces[0];
+  sel.onchange = () => { state.iface = sel.value; build(); refresh(); };
+  const nav = $('#ranges');
+  for (const k of Object.keys(RANGES)) {
+    const b = document.createElement('button');
+    b.textContent = k; b.dataset.r = k;
+    b.onclick = () => { state.stack = []; state.live = k; markLive(k); refresh(); };
+    nav.append(b);
+  }
+  const bk = document.createElement('button');
+  bk.textContent = '⤺ back'; bk.onclick = back; nav.append(bk);
+  markLive(state.live);
+  build(); refresh();
+  setInterval(() => state.live && refresh(), 1000);
+  mq.addEventListener('change', () => { build(); refresh(); });
+  let rt; addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(() => {
+    plots.forEach(p => p.u.setSize({ width: p.box.clientWidth, height: 170 })); }, 150); });
+})();
+</script>
+</body>
+</html>

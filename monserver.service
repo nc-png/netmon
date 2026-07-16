@@ -1,0 +1,25 @@
+[Unit]
+Description=monserver - in-RAM network monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+EnvironmentFile=/etc/default/monserver
+ExecStart=/usr/local/bin/monserver $OPTS
+Restart=always
+RestartSec=2
+# unprivileged throwaway uid; CAP_NET_RAW is all the daemon needs
+# (talker sampling + TCP event capture; counters need no privilege at all)
+DynamicUser=yes
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW
+# history is mlockall'ed; the limit makes CAP_IPC_LOCK unnecessary
+LimitMEMLOCK=infinity
+# enforce nothing-on-disk: the whole filesystem is read-only to the service
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target
