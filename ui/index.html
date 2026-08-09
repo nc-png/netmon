@@ -47,6 +47,7 @@ td { padding: .15rem .4rem; border-bottom: 1px solid var(--grid); }
 tr:last-child td { border-bottom: 0; }
 .u-title { font-size: .85rem !important; color: var(--ink2) !important; font-weight: 600 !important; }
 .u-legend { font-size: .72rem !important; color: var(--ink2) !important; }
+.u-legend .u-value { text-align: left; }
 .hint { color: var(--mut); font-size: .75rem; padding: 0 1rem 1rem; }
 </style>
 </head>
@@ -68,7 +69,7 @@ tr:last-child td { border-bottom: 0; }
   <div class="card"><h2>Top sources — inbound</h2><table id="t_rx"></table></div>
   <div class="card"><h2>Top destinations — outbound</h2><table id="t_tx"></table></div>
 </section>
-<p class="hint">Drag on any chart to zoom in (data is re-fetched at full 200&nbsp;ms resolution) · double-click to zoom back out · faint dashed lines are per-bucket peaks.</p>
+<p class="hint">Drag on any chart to zoom in (data is re-fetched at full 200&nbsp;ms resolution) · double-click to zoom back out · faint dashed lines are per-bucket peaks · click a legend label to toggle its series — “estab resets” and “retrans segs” start hidden (routine TCP, not failures) · the events table only sees SYN / SYN-ACK / RST, so retransmitted data segments can’t be attributed there.</p>
 <script src="/uplot.js"></script>
 <script>
 const $ = s => document.querySelector(s);
@@ -88,7 +89,7 @@ function fmtSI(v, unit) {
   return x.toFixed(Math.abs(x) >= 100 ? 0 : Math.abs(x) >= 10 ? 1 : 2) + ' ' + p + unit;
 }
 
-const CHARTS = IF => [
+const CHARTS = (IF, PING) => [
   { title: 'Throughput', unit: 'bit/s', peak: true,
     series: [{ n: IF+'.rx_bytes', l: 'rx', x: 8 }, { n: IF+'.tx_bytes', l: 'tx', x: 8 }] },
   { title: 'Packets', unit: 'pkt/s', peak: true,
@@ -96,16 +97,29 @@ const CHARTS = IF => [
   { title: 'Drops & errors', unit: '/s',
     series: [{ n: IF+'.rx_drop', l: 'rx drop' }, { n: IF+'.tx_drop', l: 'tx drop' },
              { n: IF+'.rx_errs', l: 'rx err' }, { n: IF+'.tx_errs', l: 'tx err' },
-             { n: 'sys.softnet_drop', l: 'softnet drop' }] },
+             { n: 'sys.softnet_drop', l: 'softnet drop' }, { n: 'sys.softnet_squeeze', l: 'squeeze' }] },
   { title: 'TCP failures', unit: '/s', ev: true,
+    // estab resets & retrans segs are routine TCP on a busy box, not failures —
+    // start them hidden; a click on the legend label toggles them on
     series: [{ n: 'tcp.attempt_fails', l: 'attempt fails' }, { n: 'tcp.listen_drops', l: 'listen drops' },
-             { n: 'tcp.listen_overflows', l: 'listen overflows' }, { n: 'tcp.estab_resets', l: 'estab resets' },
-             { n: 'tcp.retrans_segs', l: 'retrans segs' }] },
-  { title: 'CPU', unit: '%', max100: true,
+             { n: 'tcp.listen_overflows', l: 'listen overflows' }, { n: 'tcp.estab_resets', l: 'estab resets', off: true },
+             { n: 'tcp.retrans_segs', l: 'retrans segs', off: true }] },
+  { title: 'TCP sockets', unit: '',
+    series: [{ n: 'sys.tcp_inuse', l: 'in use' }, { n: 'sys.tcp_tw', l: 'time-wait' },
+             { n: 'sys.tcp_orphan', l: 'orphan' }] },
+  { title: 'CPU & conntrack', unit: '%', max100: true,
     series: [{ n: 'sys.cpu_busy', l: 'busy' }, { n: 'sys.cpu_softirq', l: 'softirq' },
-             { n: 'sys.cpu_softirq_max', l: 'softirq max core' }] },
+             { n: 'sys.cpu_softirq_max', l: 'softirq max core' },
+             { n: 'sys.conntrack_pct', l: 'conntrack' }] },
   { title: 'Net softirqs', unit: '/s',
     series: [{ n: 'sys.softirq_net_rx', l: 'NET_RX' }, { n: 'sys.softirq_net_tx', l: 'NET_TX' }] },
+  // gaps in RTT = replies missing that tick; "lost" confirms it 1s later
+  ...(PING.length ? [
+    { title: 'Nexthop RTT', unit: 'ms',
+      series: PING.map(t => ({ n: `ping.${t}.rtt`, l: t })) },
+    { title: 'Nexthop loss', unit: '/s',
+      series: PING.map(t => ({ n: `ping.${t}.lost`, l: t })) },
+  ] : []),
 ];
 
 let plots = [];
@@ -119,7 +133,7 @@ function build() {
   const pal = PAL[mode()], mut = cssVar('--mut'), grid = cssVar('--grid');
   // create every card first so the grid reaches its final column count,
   // then size the plots against the settled layout
-  const cards = CHARTS(state.iface).map(c => {
+  const cards = CHARTS(state.iface, state.ping).map(c => {
     const el = document.createElement('div'); el.className = 'card';
     const box = document.createElement('div');
     const cap = document.createElement('div'); cap.className = 'cap';
@@ -130,7 +144,7 @@ function build() {
     const series = [{}];
     c.series.forEach((s, i) => {
       series.push({ label: s.l, stroke: pal[i], width: 2, points: { show: false },
-        value: (u, v) => fmtSI(v, c.unit) });
+        show: !s.off, value: (u, v) => fmtSI(v, c.unit) });
       if (c.peak) series.push({ label: s.l + ' pk', stroke: pal[i] + '55', width: 1,
         dash: [3, 3], points: { show: false }, value: (u, v) => fmtSI(v, c.unit) });
     });
@@ -161,6 +175,10 @@ function build() {
         markLive(null); refresh();
       }] },
     }, series.map(() => []), box);
+    // reserve the hover-value width so the legend never rewraps — a rewrap
+    // shifts the charts below out from under uPlot's cached cursor geometry
+    // (crosshair lands below the pointer until the next scroll/resize)
+    box.querySelectorAll('.u-value').forEach(v => v.style.minWidth = (7 + c.unit.length) + 'ch');
     el.addEventListener('dblclick', back);
     if (c.ev) {
       box.style.cursor = 'crosshair';
@@ -202,19 +220,31 @@ async function refresh() {
 
 async function inspectTCP(u) {
   if (Date.now() - (state.zoomedAt || 0) < 400) return; // that click was a drag-zoom
-  const idx = u.cursor.idx;
-  if (idx == null || u.data[0][idx] == null) return;
-  const t = u.data[0][idx] * 1000;
-  const half = Math.max(state.step || 200, 2000) / 2; // clicked bucket, min 2s window
+  // nearest sample if the cursor snapped to one, else raw click position —
+  // clicks right of the last sample used to be silently ignored
+  const idx = u.cursor.idx, xs = u.data[0];
+  const t = (idx != null && xs[idx] != null ? xs[idx] : u.posToVal(u.cursor.left, 'x')) * 1000;
+  if (!isFinite(t)) return;
+  const half = Math.max(1.5 * (state.step || 200), 2000); // clicked bucket ±1, min 4s window
   const from = Math.round(t - half), to = Math.round(t + half);
-  const r = await j(`/api/tcpevents?iface=${state.iface}&from=${from}&to=${to}&n=30`);
+  const r = await j(`/api/tcpevents?iface=${state.iface}&from=${from}&to=${to}&n=200`);
+  const rows = r.rows || [];
+  // a SYN with no SYN-ACK back from the same remote+port is what "attempt
+  // fails" / "listen drops" are made of — flag the shortfall
+  const acks = {};
+  rows.forEach(e => { if (e.type === 'SYN-ACK') acks[(e.dir === 'in' ? 'out' : 'in') + e.remote + ':' + e.port] = e.count; });
+  const note = e => {
+    if (e.type !== 'SYN') return '';
+    const un = e.count - (acks[e.dir + e.remote + ':' + e.port] || 0);
+    return un > 0 ? `⚠ ${un} unanswered` : '';
+  };
   $('#ev_h').textContent = `TCP events ${new Date(from).toLocaleTimeString()} – ${new Date(to).toLocaleTimeString()}`
     + ` · ${r.total} events` + (state.iface ? ` on ${state.iface}` : '');
   $('#ev_t').innerHTML =
-    '<tr><th>count</th><th>event</th><th>dir</th><th>remote</th><th>port</th></tr>'
-    + ((r.rows || []).map(e =>
-        `<tr><td>${e.count}</td><td>${e.type}</td><td>${e.dir}</td><td>${e.remote}</td><td>${e.port}</td></tr>`).join('')
-      || '<tr><td colspan="5">no SYN / SYN-ACK / RST packets seen in this window</td></tr>');
+    '<tr><th>count</th><th>event</th><th>dir</th><th>remote</th><th>port</th><th></th></tr>'
+    + (rows.slice(0, 30).map(e =>
+        `<tr><td>${e.count}</td><td>${e.type}</td><td>${e.dir}</td><td>${e.remote}</td><td>${e.port}</td><td>${note(e)}</td></tr>`).join('')
+      || '<tr><td colspan="6">no SYN / SYN-ACK / RST packets seen in this window</td></tr>');
 }
 
 async function talkers() {
@@ -246,6 +276,7 @@ function markLive(k) {
   const sel = $('#iface');
   meta.ifaces.forEach(i => sel.add(new Option(i, i)));
   state.iface = meta.ifaces[0];
+  state.ping = meta.ping || [];
   sel.onchange = () => { state.iface = sel.value; build(); refresh(); };
   const nav = $('#ranges');
   for (const k of Object.keys(RANGES)) {

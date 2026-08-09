@@ -40,6 +40,7 @@ Flags:
 | `-sample` | `128` | talker sampling 1-in-N (power of two; `1` = every packet, fine ≤ ~10 Gbit/s) |
 | `-retention` | `168h` | in-RAM history window |
 | `-topn` | `20` | talkers kept per 200 ms tick per direction |
+| `-ping` | off | comma-separated IPv4 addresses to ICMP-probe every 200 ms (your nexthops); adds per-target RTT and loss charts |
 | `-no-mlock` | off | skip `mlockall` (history may swap to disk) |
 
 RAM: ≈ 0.45 GB for counters + ≈ 1.45 GB per interface for talker history at

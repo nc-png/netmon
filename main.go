@@ -16,6 +16,7 @@ func main() {
 	sample := flag.Uint64("sample", 128, "talker packet sampling, 1-in-N (rounded up to a power of two; 1 = every packet)")
 	retention := flag.Duration("retention", 7*24*time.Hour, "in-RAM history retention")
 	topn := flag.Int("topn", 20, "top talkers kept per 200ms tick per direction")
+	ping := flag.String("ping", "", "comma-separated IPv4 addresses to ICMP-probe each tick (e.g. your nexthops)")
 	noMlock := flag.Bool("no-mlock", false, "skip mlockall (history may be swapped to disk)")
 	flag.Parse()
 	if *ifaces == "" {
@@ -44,12 +45,33 @@ func main() {
 	}
 	for _, s := range []string{"tcp.attempt_fails", "tcp.estab_resets", "tcp.retrans_segs",
 		"tcp.listen_drops", "tcp.listen_overflows",
-		"sys.softirq_net_rx", "sys.softirq_net_tx", "sys.softnet_drop"} {
+		"sys.softirq_net_rx", "sys.softirq_net_tx", "sys.softnet_drop", "sys.softnet_squeeze"} {
 		st.AddSeries(s, false)
 	}
 	st.AddSeries("sys.cpu_busy", true)
 	st.AddSeries("sys.cpu_softirq", true)
 	st.AddSeries("sys.cpu_softirq_max", true)
+	st.AddSeries("sys.conntrack_pct", true)
+	st.AddSeries("sys.tcp_inuse", true)
+	st.AddSeries("sys.tcp_tw", true)
+	st.AddSeries("sys.tcp_orphan", true)
+
+	var pinger *Pinger
+	var pingTargets []string
+	if *ping != "" {
+		pingTargets = strings.Split(*ping, ",")
+		p, err := NewPinger(pingTargets)
+		if err != nil {
+			log.Printf("icmp probing DISABLED: %v", err)
+			pingTargets = nil
+		} else {
+			pinger = p
+			for _, t := range pingTargets {
+				st.AddSeries("ping."+t+".rtt", true)
+				st.AddSeries("ping."+t+".lost", false)
+			}
+		}
+	}
 
 	sniffers := map[string]*Sniffer{}
 	events := map[string]*EventRing{}
@@ -72,6 +94,10 @@ func main() {
 		tk := time.NewTicker(tickMs * time.Millisecond)
 		for now := range tk.C {
 			vals := col.Collect()
+			if pinger != nil {
+				pinger.Flush(vals)
+				pinger.Probe()
+			}
 			tops := map[string]map[[16]byte]uint64{}
 			for i, sn := range sniffers {
 				tops[i+"/rx"], tops[i+"/tx"] = sn.Flush()
@@ -83,5 +109,5 @@ func main() {
 	histMB := (int64(len(st.names))*st.slots*8 + int64(len(list))*2*st.slots*st.topN*12) >> 20
 	log.Printf("monserver: http://%s ifaces=%v sample=1/%d retention=%s history≈%dMB",
 		*listen, list, *sample, *retention, histMB)
-	log.Fatal(http.ListenAndServe(*listen, newAPI(st, list, events)))
+	log.Fatal(http.ListenAndServe(*listen, newAPI(st, list, pingTargets, events)))
 }

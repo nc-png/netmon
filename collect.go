@@ -76,6 +76,8 @@ func (c *Collector) Collect() map[string]float64 {
 			out["sys.cpu_softirq_max"] = mx
 		}
 	}
+	readConntrack(out)
+	readSockstat(out)
 	c.prev = cur
 	return out
 }
@@ -219,14 +221,66 @@ func readSoftnet(cur map[string]uint64) {
 	if err != nil {
 		return
 	}
-	var total uint64 // column 2 = packets dropped from the softnet backlog, per cpu
+	// col 2 = packets dropped from the softnet backlog, col 3 = time_squeeze
+	// (net_rx budget exhausted with work left — softirq saturation), per cpu
+	var drop, squeeze uint64
 	for _, ln := range strings.Split(string(b), "\n") {
 		f := strings.Fields(ln)
-		if len(f) < 2 {
+		if len(f) < 3 {
 			continue
 		}
 		v, _ := strconv.ParseUint(f[1], 16, 64)
-		total += v
+		drop += v
+		v, _ = strconv.ParseUint(f[2], 16, 64)
+		squeeze += v
 	}
-	cur["sys.softnet_drop"] = total
+	cur["sys.softnet_drop"] = drop
+	cur["sys.softnet_squeeze"] = squeeze
+}
+
+// readSockstat emits TCP socket-table gauges: a time-wait/orphan explosion
+// (mass short-lived connections) looks very different from a few fat flows.
+func readSockstat(out map[string]float64) {
+	b, err := os.ReadFile("/proc/net/sockstat")
+	if err != nil {
+		return
+	}
+	for _, ln := range strings.Split(string(b), "\n") {
+		if !strings.HasPrefix(ln, "TCP:") {
+			continue
+		}
+		f := strings.Fields(ln) // TCP: inuse N orphan N tw N alloc N mem N
+		for i := 1; i+1 < len(f); i += 2 {
+			var k string
+			switch f[i] {
+			case "inuse":
+				k = "sys.tcp_inuse"
+			case "orphan":
+				k = "sys.tcp_orphan"
+			case "tw":
+				k = "sys.tcp_tw"
+			default:
+				continue
+			}
+			if v, err := strconv.ParseFloat(f[i+1], 64); err == nil {
+				out[k] = v
+			}
+		}
+		return
+	}
+}
+
+// readConntrack emits table fill % — a full table silently eats new flows
+// (the "table full" log is ratelimited and easy to miss).
+func readConntrack(out map[string]float64) {
+	c, err1 := os.ReadFile("/proc/sys/net/netfilter/nf_conntrack_count")
+	m, err2 := os.ReadFile("/proc/sys/net/netfilter/nf_conntrack_max")
+	if err1 != nil || err2 != nil {
+		return
+	}
+	cv, _ := strconv.ParseFloat(strings.TrimSpace(string(c)), 64)
+	mv, _ := strconv.ParseFloat(strings.TrimSpace(string(m)), 64)
+	if mv > 0 {
+		out["sys.conntrack_pct"] = 100 * cv / mv
+	}
 }

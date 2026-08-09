@@ -17,11 +17,12 @@ var uiFS embed.FS
 type api struct {
 	st     *Store
 	ifaces []string
+	ping   []string
 	events map[string]*EventRing
 }
 
-func newAPI(st *Store, ifaces []string, events map[string]*EventRing) http.Handler {
-	a := &api{st, ifaces, events}
+func newAPI(st *Store, ifaces, ping []string, events map[string]*EventRing) http.Handler {
+	a := &api{st, ifaces, ping, events}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
@@ -90,6 +91,7 @@ func (a *api) meta(w http.ResponseWriter, r *http.Request) {
 	a.st.mu.RUnlock()
 	writeJSON(w, map[string]any{
 		"ifaces":   a.ifaces,
+		"ping":     a.ping,
 		"periodMs": tickMs,
 		"nowMs":    time.Now().UnixMilli(),
 		"oldestMs": oldest,
